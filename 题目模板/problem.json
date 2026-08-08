@@ -1,0 +1,21 @@
+{
+  "label": "uoj",
+  "judge": {
+    "adapter": "uoj",
+    "config": {}
+  },
+  "submit": {
+    "upload": true,
+    "zipFolder": true,
+    "form": {
+      "files": [
+        {
+          "path": "main.cpp",
+          "label": "Main Code",
+          "type": { "editor": { "language": "cpp" } }
+        }
+      ]
+    }
+  },
+  "instanceLabel": "uoj"
+}
