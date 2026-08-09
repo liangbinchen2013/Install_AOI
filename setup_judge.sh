@@ -5,7 +5,10 @@
 # 背景:
 #   azukiiro 的 uoj 适配器需要 /opt/uoj_judger/main_judger。
 #   新旧两代 UOJ-System judger 格式不兼容(新版输出纯文本,azukiiro 期望 XML),
-#   因此本脚本部署一个 Python wrapper,直接做编译→运行→比对→输出 XML。
+#   因此本脚本直接部署仓库中的 Python wrapper (main_judger_wrapper.py),
+#   它负责编译→运行→比对→输出与 azukiiro uoj 适配器一致的 XML 结果。
+#
+# ⚠ 注意: 本脚本安装的是 Python wrapper,不是 UOJ-System 官方 C++ judger!
 #
 # 功能:
 #   1. 安装编译依赖(g++,python3,bwrap)
@@ -24,6 +27,9 @@
 set -Eeuo pipefail
 
 INSTALL_DIR="${UOJ_INSTALL_DIR:-/opt/uoj_judger}"
+# main_judger_wrapper.py 需与本脚本放在同一目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WRAPPER_SRC="${SCRIPT_DIR}/main_judger_wrapper.py"
 YES=0
 FORCE=0
 
@@ -55,9 +61,11 @@ AOI 评测机(UOJ Judger)部署脚本
   -h, --help     显示本帮助
 
 部署内容:
-  /opt/uoj_judger/main_judger  ← Python wrapper(编译+运行+比对,输出 XML)
+  /opt/uoj_judger/main_judger  ← Python wrapper(来自 main_judger_wrapper.py,输出 XML)
   /opt/uoj_judger/result/      ← 判题结果输出
   /opt/uoj_judger/work/        ← 判题工作目录
+
+⚠ 注意: 安装的是 Python wrapper,不是 UOJ-System 官方 judger!
 
 评测语言: C++(g++), Python3, Java, Pascal
 EOF
@@ -78,6 +86,9 @@ echo "│   AOI 评测机(UOJ Judger)· 部署脚本               │"
 echo "│   安装目录: ${INSTALL_DIR}                         │"
 echo "│   方案:     Python wrapper(兼容新旧 judger 格式)  │"
 echo "└──────────────────────────────────────────────────┘"
+echo
+warn "注意: 本脚本安装的是 Python wrapper(main_judger_wrapper.py),"
+warn "      不是 UOJ-System 官方 judger!"
 echo
 
 # -----------------------------------------------------------------------------
@@ -149,213 +160,28 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# 4. 部署 Python wrapper
+# 4. 部署 Python wrapper(main_judger_wrapper.py)
 # -----------------------------------------------------------------------------
 log "部署 main_judger wrapper 到 ${INSTALL_DIR}..."
+if [ ! -f "${WRAPPER_SRC}" ]; then
+  die "未找到 ${WRAPPER_SRC} —— 请将 main_judger_wrapper.py 与本脚本放在同一目录"
+fi
+
 sudo rm -rf "${INSTALL_DIR}"
 sudo mkdir -p "${INSTALL_DIR}/result" "${INSTALL_DIR}/work"
 
-# 嵌入的 Python wrapper(见本脚本末尾 WRAPPER_EOF 标记)
-sudo tee "${INSTALL_DIR}/main_judger" > /dev/null <<'WRAPPER_EOF'
-#!/usr/bin/python3
-"""
-AOI / azukiiro UOJ adapter 兼容层 — 编译+运行+比对+输出 XML
-"""
-import os, sys, shutil, subprocess, traceback, xml.etree.ElementTree as ET
-from pathlib import Path
-
-LOG_FILE = '/opt/uoj_judger/result/wrapper.log'
-def log(msg):
-    try:
-        with open(LOG_FILE, 'a') as f: f.write(f'{msg}\n')
-    except: pass
-
-def parse_conf(path):
-    conf = {}
-    if os.path.exists(path):
-        with open(path, encoding='utf-8', errors='replace') as f:
-            for line in f:
-                line = line.strip()
-                if not line or ' ' not in line: continue
-                key, value = line.split(' ', 1)
-                conf[key.strip()] = value.strip()
-    return conf
-
-def error_result(status, message):
-    root = ET.Element('result')
-    ET.SubElement(root, 'score').text = '0'
-    ET.SubElement(root, 'time').text = '0'
-    ET.SubElement(root, 'memory').text = '0'
-    ET.SubElement(root, 'error').text = status
-    details = ET.SubElement(root, 'details')
-    ET.SubElement(details, 'error').text = message
-    return ET.tostring(root, encoding='unicode')
-
-def compile_solution(sol_dir, lang, work_dir):
-    sources = []
-    for ext in ['.cpp', '.cc', '.cxx', '.c', '.pas', '.py', '.java']:
-        sources.extend(Path(sol_dir).glob(f'*{ext}'))
-    if not sources: return False, "No source file found"
-    src = sources[0]
-    exec_path = os.path.join(work_dir, 'program')
-    lang_lower = lang.lower()
-    if lang_lower in ('c++', 'c++11', 'c++14', 'c++17'):
-        cmd = ['g++', '-std=c++17', '-O2', '-o', exec_path, str(src)]
-    elif lang_lower.startswith('python'):
-        shutil.copy(str(src), exec_path + '.py')
-        return True, exec_path + '.py'
-    elif lang_lower == 'java':
-        cmd = ['javac', '-d', work_dir, str(src)]
-    elif lang_lower == 'pascal':
-        cmd = ['fpc', '-O2', '-o' + exec_path, str(src)]
-    else:
-        return False, f"Unsupported language: {lang}"
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=work_dir)
-        if result.returncode != 0:
-            return False, f"Compile Error:\n{result.stderr[:500]}\n{result.stdout[:500]}"
-        return True, exec_path
-    except subprocess.TimeoutExpired:
-        return False, "Compile timeout"
-    except FileNotFoundError:
-        return False, f"Compiler not found: {cmd[0]}"
-
-def run_test(exec_path, lang, input_file, work_dir, time_limit, mem_limit):
-    try:
-        with open(input_file, 'r') as f: input_data = f.read()
-    except FileNotFoundError:
-        return False, f"Input file not found: {input_file}", 0, 0
-    lang_lower = lang.lower()
-    if lang_lower.startswith('python'):
-        cmd = ['python3', exec_path]
-    elif lang_lower == 'java':
-        cmd = ['java', '-cp', work_dir, os.path.splitext(os.path.basename(exec_path))[0]]
-    else:
-        cmd = [exec_path]
-    try:
-        result = subprocess.run(cmd, input=input_data, capture_output=True,
-                                text=True, timeout=time_limit, cwd=work_dir)
-        if result.returncode != 0:
-            return False, f"Runtime Error (exit {result.returncode})\n{result.stderr[:300]}", 0, 0
-        return True, result.stdout, 0, 0
-    except subprocess.TimeoutExpired:
-        return False, "Time Limit Exceeded", time_limit * 1000, 0
-    except Exception as e:
-        return False, f"Runtime Error: {e}", 0, 0
-
-def compare_output(actual, expected_file, checker='ncmp'):
-    try:
-        with open(expected_file, 'r') as f: expected = f.read()
-    except FileNotFoundError:
-        return False, f"Expected output not found: {expected_file}"
-    if checker in ('ncmp', 'acmp', 'wcmp'):
-        def normalize(s):
-            return '\n'.join(line.rstrip() for line in s.rstrip('\n').split('\n'))
-        return normalize(actual) == normalize(expected), "Output mismatch"
-    else:
-        return actual.strip() == expected.strip(), "Output mismatch"
-
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: main_judger <solution_dir> <problem_dir>", file=sys.stderr)
-        sys.exit(1)
-    sol_dir = sys.argv[1]
-    prob_dir = sys.argv[2]
-    result_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'result')
-    work_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'work')
-    log(f'sol_dir={sol_dir} prob_dir={prob_dir}')
-    log(f'sol exists={os.path.isdir(sol_dir)} prob exists={os.path.isdir(prob_dir)}')
-    if os.path.isdir(sol_dir):
-        log(f'sol contents: {os.listdir(sol_dir)[:20]}')
-    os.makedirs(result_dir, exist_ok=True)
-    os.makedirs(work_dir, exist_ok=True)
-
-    prob_conf = parse_conf(os.path.join(prob_dir, 'problem.conf'))
-    sub_conf = parse_conf(os.path.join(sol_dir, 'submission.conf'))
-    lang = sub_conf.get('answer_language', 'C++14')
-
-    ok, msg = compile_solution(sol_dir, lang, work_dir)
-    if not ok:
-        xml = error_result('Compile Error', msg)
-        with open(os.path.join(result_dir, 'result.txt'), 'w') as f: f.write(xml)
-        print(xml)
-        return
-
-    exec_path = msg
-    input_suf = prob_conf.get('input_suf', 'in')
-    output_suf = prob_conf.get('output_suf', 'out')
-    time_limit = max(1, int(prob_conf.get('time_limit', '1')))
-
-    tests = sorted(Path(prob_dir).glob(f'*.{input_suf}'))
-    if not tests: tests = sorted(Path(prob_dir).glob('*.in'))
-
-    root = ET.Element('result')
-    total_score = 0
-    final_status = 'Accepted'
-    details = ET.SubElement(root, 'details')
-    subtask = ET.SubElement(details, 'subtask', {
-        'num': '1', 'score': prob_conf.get('subtask_score_1', '100'),
-        'info': 'Accepted', 'time': '0', 'memory': '0', 'type': 'sum'
-    })
-    subtask_score = float(prob_conf.get('subtask_score_1', '100'))
-
-    for i, test_in in enumerate(tests, 1):
-        test_num = int(''.join(c for c in test_in.stem if c.isdigit()) or i)
-        test_out = test_in.with_suffix(f'.{output_suf}')
-        if not test_out.exists(): test_out = test_in.with_suffix('.out')
-
-        ok, output, t, m = run_test(exec_path, lang, str(test_in), work_dir, time_limit, 0)
-        test_elem = ET.SubElement(subtask, 'test', {
-            'num': str(test_num), 'score': '0', 'info': 'Accepted',
-            'time': str(t), 'memory': str(m)
-        })
-        ET.SubElement(test_elem, 'in').text = Path(test_in).read_text(encoding='utf-8', errors='replace')[:500]
-        ET.SubElement(test_elem, 'out').text = output[:500] if ok else output
-        ET.SubElement(test_elem, 'res').text = ''
-
-        if not ok:
-            if 'Time' in output:
-                test_elem.set('info', 'Time Limit Exceeded')
-                final_status = 'Time Limit Exceeded'
-            else:
-                test_elem.set('info', 'Runtime Error')
-                if final_status == 'Accepted': final_status = 'Runtime Error'
-            continue
-        match, _ = compare_output(output, str(test_out))
-        if match:
-            test_elem.set('score', str(subtask_score / len(tests)))
-            total_score += subtask_score / len(tests)
-        else:
-            test_elem.set('info', 'Wrong Answer')
-            if final_status == 'Accepted': final_status = 'Wrong Answer'
-
-    if final_status == 'Accepted': total_score = subtask_score
-    ET.SubElement(root, 'score').text = str(int(total_score))
-    ET.SubElement(root, 'time').text = '0'
-    ET.SubElement(root, 'memory').text = '0'
-    if final_status != 'Accepted':
-        ET.SubElement(root, 'error').text = final_status
-
-    xml = ET.tostring(root, encoding='unicode')
-    with open(os.path.join(result_dir, 'result.txt'), 'w') as f: f.write(xml)
-    print(xml)
-
-if __name__ == '__main__':
-    log(f'wrapper start args={sys.argv[1:]}')
-    try:
-        main()
-        log('wrapper exit 0')
-    except Exception as e:
-        log(f'wrapper exception: {e}\n{traceback.format_exc()}')
-        sys.exit(1)
-WRAPPER_EOF
-
+# 直接安装仓库中的 main_judger_wrapper.py(不再内嵌代码;
+# 注意: 这是 Python wrapper,不是 UOJ-System 官方 C++ judger)
+sudo cp "${WRAPPER_SRC}" "${INSTALL_DIR}/main_judger"
 sudo chmod +x "${INSTALL_DIR}/main_judger"
 # bwrap --unshare-all 下 azukiiro 用户(UID 映射后)需要写权限
 sudo chmod 777 "${INSTALL_DIR}/result" "${INSTALL_DIR}/work"
 ok "已部署 ${INSTALL_DIR}/main_judger"
+ok "  ├── 来源: ${WRAPPER_SRC}"
 ok "  ├── result/(判题结果输出,权限 777)"
 ok "  └── work/(判题工作目录,权限 777)"
+warn "注意: 安装的是 Python wrapper(main_judger_wrapper.py),"
+warn "      不是 UOJ-System 官方 judger!"
 
 # -----------------------------------------------------------------------------
 # 5. 自检
@@ -369,6 +195,14 @@ if [ -x "${INSTALL_DIR}/main_judger" ]; then
   pass=$((pass+1))
 else
   fail "main_judger 缺失"
+fi
+
+total=$((total+1))
+if [ -f "${WRAPPER_SRC}" ] && cmp -s "${WRAPPER_SRC}" "${INSTALL_DIR}/main_judger"; then
+  ok "部署内容与 main_judger_wrapper.py 一致"
+  pass=$((pass+1))
+else
+  fail "main_judger 与 main_judger_wrapper.py 不一致(需重跑脚本加 -f)"
 fi
 
 total=$((total+1))
@@ -401,7 +235,7 @@ command -v python3 >/dev/null 2>&1 && py3_ver="$(python3 --version 2>&1 | grep -
 cat <<EOF
 
 ${C_GREEN}${C_BOLD}════════════════════════════════════════════════════════════${C_RESET}
-${C_GREEN}${C_BOLD}  UOJ Judger (Python wrapper) 部署完成!                   ${C_RESET}
+${C_GREEN}${C_BOLD}  AOI 评测机 (Python wrapper) 部署完成!                  ${C_RESET}
 ${C_GREEN}${C_BOLD}════════════════════════════════════════════════════════════${C_RESET}
 
 ${C_BOLD}部署路径:${C_RESET}
@@ -427,9 +261,15 @@ ${C_BOLD}与 AOI 前端关联(题目 problem.json):${C_RESET}
 
 ${C_BOLD}常用命令:${C_RESET}
    file ${INSTALL_DIR}/main_judger
+   bash setup_judge.sh -f                       # 修改 main_judger_wrapper.py 后重新部署
    sudo journalctl -u azukiiro@daemon -f       # 跟踪评测日志
    cat ${INSTALL_DIR}/result/wrapper.log        # wrapper 调试日志
 
-${C_YELLOW}提示: wrapper 兼容新旧 UOJ judger 格式,直接编译+运行+比对。${C_RESET}
+${C_RED}${C_BOLD}⚠ 重要提醒:${C_RESET}
+${C_RED}  本脚本安装的是 Python wrapper(main_judger_wrapper.py),${C_RESET}
+${C_RED}  不是 UOJ-System 官方 C++ judger!${C_RESET}
+${C_RED}  若需要官方 UOJ judger,请自行部署 uoj-judger 项目。${C_RESET}
+
+${C_YELLOW}提示: wrapper 直接编译+运行+比对,输出 azukiiro 可解析的 XML 结果。${C_RESET}
 ${C_YELLOW}      重复运行本脚本幂等(已部署则跳过;-f 强制重部署)。${C_RESET}
 EOF
