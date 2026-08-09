@@ -1,3 +1,5 @@
+**脚本编写在windows系统上，请在运行前输入命令：**```sed -i 's/\r$//' 脚本名.sh```**修改格式！**
+
 ## 运行顺序
 
 setup_aoi.sh -> setup_azukiiro.sh -> setup_OSS.sh/setup.judge.sh
