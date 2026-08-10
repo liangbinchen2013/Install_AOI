@@ -378,9 +378,11 @@ def main():
         return
 
     subtask_score = conf_float(prob_conf, 'subtask_score_1', 100.0)
-    test_score = int(subtask_score / len(test_files))
+    # 每测试点分值用浮点数保留精度:若取整(如 101 点 100 分时每点 int(0.99)=0),
+    # 会出现"过 99 个点只得 0 分、全对才满分"的失真,最终总分再四舍五入
+    test_score = subtask_score / len(test_files)
 
-    total_score = 0
+    total_score = 0.0
     final_status = 'Accepted'
     total_time = 0
     total_mem = 0
@@ -423,7 +425,7 @@ def main():
         else:
             t_disp, m_disp = t_ms, m_kb
 
-        score = test_score if test_status == 'Accepted' else 0
+        score = test_score if test_status == 'Accepted' else 0.0
         total_score += score
         if test_status != 'Accepted' and final_status == 'Accepted':
             final_status = test_status
@@ -439,7 +441,8 @@ def main():
 
         test = ET.SubElement(details, 'test', {
             'num': str(i),
-            'score': str(score),
+            # 测试点分值同样取整展示(azukiiro 适配器按整数解析,浮点字符串会解析失败)
+            'score': str(int(round(score))),
             'info': test_status,
             'time': str(t_disp),
             'memory': str(m_disp),
@@ -448,14 +451,15 @@ def main():
         ET.SubElement(test, 'out').text = truncate(prog_out, 500)
         ET.SubElement(test, 'res').text = truncate(res_msg, 500)
 
-    if final_status == 'Accepted':
-        total_score = int(subtask_score)
+    # 浮点累加后统一四舍五入为整数输出(全对时 ≈ subtask_score,与原特判等效;
+    # 部分正确则按实际通过比例计分)
+    total_score_display = int(round(total_score))
 
     # 重要: 测试点级失败(WA/TLE/MLE/OLE/RE)不要在 result 级写 <error>。
     # azukiiro 适配器逻辑: result.Error 非空时直接跳过 <details> 测试点解析,
     # 导致非 AC 结果没有具体测试点详情。状态由各 <test info=> 推导即可。
     # 只有无测试点的错误(编译错误/系统错误)才由 error_result_xml 带 <error>。
-    ET.SubElement(root, 'score').text = str(total_score)
+    ET.SubElement(root, 'score').text = str(total_score_display)
     ET.SubElement(root, 'time').text = str(total_time)
     ET.SubElement(root, 'memory').text = str(total_mem)
 
