@@ -15,10 +15,12 @@ AOI / azukiiro UOJ adapter 兼容层
   - <test> 必须是 <details> 的直接子元素,不要包在 <subtask> 里
   - 任何情况下都以退出码 0 结束,错误信息写进 XML。
     退出码非 0 时适配器会直接报 "An Error has occurred: exit status 1"。
-  - 时间限制: UOJ problem.conf 的 time_limit 单位是毫秒(如 1000 = 1s),
-    换算成秒作为墙钟超时;< 100 的取值按秒处理以兼容旧配置。
+  - 时间限制: UOJ problem.conf 的 time_limit 单位统一为秒,支持小数
+    (150 = 150s,0.15 = 150ms),换算成秒作为墙钟超时。TLE 点的 time 按
+    题目时限计、memory 取该点实测峰值。memory_limit 单位 MB,同样支持
+    小数(如 1.6 = 1.6MB)。
 """
-import os, sys, shutil, subprocess, tempfile, traceback, resource, signal, threading, math
+import os, sys, shutil, subprocess, tempfile, traceback, resource, signal, threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -83,7 +85,8 @@ def sandbox_exec(cmd, input_data, work_dir, time_limit, mem_limit_mb, output_lim
       prog_output - the program's actual stdout (partial output on timeout/kill,
                     truncated to MAX_OUT) — 用于每个测试点的详细展示
     """
-    mem_bytes = mem_limit_mb * 1024 * 1024
+    # 支持小数 MB(如 1.6MB):setrlimit 要求整数字节,按四舍五入取整
+    mem_bytes = int(round(mem_limit_mb * 1024 * 1024))
     out_bytes = output_limit_mb * 1024 * 1024
 
     def preexec():
@@ -346,12 +349,12 @@ def main():
 
     lang = sub_conf.get('answer_language', 'C++14')
 
-    # UOJ problem.conf: time_limit 单位是毫秒(如 1000 = 1s);< 100 按秒兼容旧配置
-    time_limit_ms = conf_int(prob_conf, 'time_limit', 1000)
-    if time_limit_ms < 100:
-        time_limit_ms *= 1000
-    time_limit_sec = max(1, math.ceil(time_limit_ms / 1000.0))
-    mem_limit_mb = conf_int(prob_conf, 'memory_limit', 256)
+    # time_limit 单位统一为秒,支持小数(150 = 150s,0.15 = 150ms);
+    # 换算成毫秒供 TLE 显示;墙钟超时保留小数精度(最小 0.05s)
+    time_limit_ms = conf_float(prob_conf, 'time_limit', 1.0) * 1000
+    time_limit_sec = max(0.05, time_limit_ms / 1000.0)
+    # memory_limit 单位 MB,支持小数(如 1.6 = 1.6MB);内部按字节取整
+    mem_limit_mb = conf_float(prob_conf, 'memory_limit', 256.0)
     output_limit_mb = conf_int(prob_conf, 'output_limit', 64)
     input_suf = conf_get(prob_conf, 'input_suf', 'in')
     output_suf = conf_get(prob_conf, 'output_suf', 'out')
@@ -385,7 +388,7 @@ def main():
     total_score = 0.0
     final_status = 'Accepted'
     total_time = 0
-    total_mem = 0
+    max_mem = 0  # 顶层 memory 取所有测试点运行内存的最大值
 
     root = ET.Element('result')
     details = ET.SubElement(root, 'details')
@@ -419,9 +422,12 @@ def main():
                 test_status = 'Wrong Answer'
 
         # 每个测试点都输出详细 Time/Memory/Input/Output/Result(与 AC 一致);
-        # TLE 的 time/memory 显示为 -1(约定: 超时无数据)
+        # TLE 点按题目时间限制计(超时即视为用满时限),内存取该点实测峰值;
+        # MLE 点被内存限制强杀,监控可能采不到真实峰值,按题目上限显示
         if test_status == 'Time Limit Exceeded':
-            t_disp, m_disp = -1, -1
+            t_disp, m_disp = int(round(time_limit_ms)), m_kb
+        elif test_status == 'Memory Limit Exceeded':
+            t_disp, m_disp = t_ms, int(round(mem_limit_mb * 1024))
         else:
             t_disp, m_disp = t_ms, m_kb
 
@@ -429,9 +435,9 @@ def main():
         total_score += score
         if test_status != 'Accepted' and final_status == 'Accepted':
             final_status = test_status
-        # 顶层 time/memory 汇总所有测试点的实测值(否则非 AC 时显示 0)
-        total_time += t_ms
-        total_mem += m_kb
+        # 顶层 time 汇总所有测试点用时(TLE 计为题目时限);memory 取所有测试点的最大值
+        total_time += t_disp
+        max_mem = max(max_mem, m_disp)
 
         # Input for display (truncated)
         try:
@@ -461,7 +467,7 @@ def main():
     # 只有无测试点的错误(编译错误/系统错误)才由 error_result_xml 带 <error>。
     ET.SubElement(root, 'score').text = str(total_score_display)
     ET.SubElement(root, 'time').text = str(total_time)
-    ET.SubElement(root, 'memory').text = str(total_mem)
+    ET.SubElement(root, 'memory').text = str(max_mem)
 
     xml = ET.tostring(root, encoding='unicode')
     write_result_xml(xml)
