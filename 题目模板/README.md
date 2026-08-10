@@ -8,21 +8,20 @@
 题目模板/
 ├── problem.json     ← 题目元数据(粘贴到前端编辑器的 Config 框)
 ├── problem.conf     ← 评测配置(打包进数据 zip)
-├── tests/           ← 测试数据(打包进数据 zip)
-│   ├── 1.in         ← 第 1 组输入
-│   ├── 1.out        ← 第 1 组期望输出
-│   ├── 2.in         ← 第 2 组输入
-│   └── 2.out        ← 第 2 组期望输出
+├── 1.in         ← 第 1 组输入
+├── 1.out        ← 第 1 组期望输出
+├── 2.in         ← 第 2 组输入
+├── 2.out        ← 第 2 组期望输出
 ```
 
 ## 一、创建题目
 
 ### 步骤 1: 打包数据
 
-把 `problem.conf` + `tests/` 打包为 `data.zip`:
+把 `problem.conf` + `*.in + *.out` 打包为 `data.zip`:
 
 ```bash
-zip -r data.zip problem.conf tests/
+zip -r data.zip problem.conf *.in *.out
 ```
 
 ### 步骤 2: 在前端创建题目
