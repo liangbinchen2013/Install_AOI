@@ -1,5 +1,7 @@
 **脚本编写在windows系统上，请在运行前输入命令：**```sed -i 's/\r$//' 脚本名.sh```**修改格式！**
 
+**本脚本支持x86_64与aarch64架构。对于aarch64架构，脚本会自动用官方 npm 包 `@aoi-js/server` 本地构建等价镜像（`aoi-js/server:arm64`，与官方镜像内容一致）**
+
 ## 运行顺序
 
 setup_aoi.sh -> setup_azukiiro.sh -> setup_OSS.sh/setup.judge.sh

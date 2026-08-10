@@ -20,11 +20,25 @@
 #                         (国内可设: AOI_NPM_REGISTRY=https://registry.npmmirror.com)
 #   AOI_SERVER_IMAGE      服务端镜像,默认官方阿里云镜像
 #   AOI_REGISTRY_MIRROR   Docker Hub 加速器地址(不设时自动探测多个公共加速器)
-#   AOI_MONGO_IMAGE       覆盖 Mongo 镜像(默认 mongo:latest)
+#   AOI_MONGO_IMAGE       覆盖 Mongo 镜像(默认 mongo:latest;老 CPU/内核 VA 受限自动降级)
 #   AOI_CADDY_IMAGE       覆盖 Caddy 镜像(默认 caddy:latest)
 #
 # 兼容系统: Ubuntu/Debian/CentOS/RHEL/Alma/Rocky/openSUSE/Fedora (x86_64/aarch64)
 # Windows 用户请使用 WSL2 或 Linux 服务器运行本脚本。
+<<<<<<< Updated upstream
+=======
+#
+# arm64(aarch64)支持说明:
+#   官方 server 镜像 registry.cn-hangzhou.aliyuncs.com/aoi-js/server 仅构建了
+#   x86_64 版(GitHub Actions 在 ubuntu-latest 上构建,未做多架构推送)。
+#   arm64 上本脚本会自动用官方 npm 包 @aoi-js/server 本地构建等价镜像
+#   (官方镜像 = package.tgz → npm install,与 npm 发布产物完全一致),
+#   caddy/minio 等官方镜像均为多架构,无需处理。
+#   mongo 例外:MongoDB 官方二进制有 2 类启动即崩的兼容性问题,脚本自动选版本——
+#   ① 老 CPU(ARMv8.0/无 AVX)→ mongo:4.4.18;
+#   ② 内核 VA<47bit(香橙派等 Rockchip 内核)→ mongo:7.0
+#   (见下方 MONGO_IMAGE_TAG 检测,详见 check_mongo_cpu)。
+>>>>>>> Stashed changes
 # =============================================================================
 
 set -Eeuo pipefail
@@ -32,7 +46,59 @@ set -Eeuo pipefail
 # -----------------------------------------------------------------------------
 # 基础配置
 # -----------------------------------------------------------------------------
+<<<<<<< Updated upstream
 SERVER_IMAGE="${AOI_SERVER_IMAGE:-registry.cn-hangzhou.aliyuncs.com/aoi-js/server:latest}"
+=======
+# 架构检测:aarch64/arm64 时官方 server 镜像无 arm64 版,
+# 需用官方 npm 包 @aoi-js/server 本地构建(见 build_server_image)
+ARCH="$(uname -m)"
+IS_ARM64=0
+case "$ARCH" in
+  aarch64|arm64) IS_ARM64=1 ;;
+esac
+
+# 内核虚拟地址空间宽度(arm64):部分板子的官方内核 CONFIG_ARM64_VA_BITS=39
+# (香橙派/友善之臂等 Rockchip BSP 内核,虚拟空间仅 512GB)。MongoDB 8.x 的
+# tcmalloc 会按 1GB 对齐在高位地址(~2^47)mmap 大块内存,39/42bit 内核放不下,
+# 启动即崩:MmapAligned() failed → tcmalloc CHECK → SIGTRAP(容器 Restarting (133))。
+# 48bit 内核无此问题。读不到内核配置时按保守处理(见下方版本选择)。
+KERNEL_VA_BITS=""
+kernel_cfg="/boot/config-$(uname -r)"
+if [ -r "$kernel_cfg" ]; then
+  KERNEL_VA_BITS="$(awk -F= '/^CONFIG_ARM64_VA_BITS=/{print $2}' "$kernel_cfg" | tr -d '[:space:]')"
+fi
+if [ -z "$KERNEL_VA_BITS" ] && [ -r /proc/config.gz ] && command -v zcat >/dev/null 2>&1; then
+  KERNEL_VA_BITS="$(zcat /proc/config.gz 2>/dev/null | awk -F= '/^CONFIG_ARM64_VA_BITS=/{print $2}' | tr -d '[:space:]')" || true
+fi
+
+# Mongo 版本选择,两类独立的兼容性约束(显式指定 AOI_MONGO_IMAGE 可绕过):
+#   1) CPU 指令集:arm64 的 4.4.19+ 要求 ARMv8.2-A(dcpop 特征),x86_64 的 5.0+
+#      要求 AVX——RK3399、树莓派4 等 ARMv8.0 板子跑 mongo:latest 会非法指令崩溃,
+#      自动退回最后支持老 CPU 的 mongo:4.4.18。
+#   2) 内核地址空间(仅 arm64):VA_BITS<47 或无法确认时 mongo 8.x 必崩(SIGTRAP),
+#      取 mongo:7.0(旧版 tcmalloc 无大对齐分配问题,对 AOI 功能与 8.x 等价)。
+MONGO_IMAGE_TAG="latest"
+if [ "$IS_ARM64" -eq 1 ]; then
+  if ! grep -m1 '^Features' /proc/cpuinfo 2>/dev/null | grep -q 'dcpop'; then
+    MONGO_IMAGE_TAG="4.4.18"
+  elif [ -z "$KERNEL_VA_BITS" ] || [ "$KERNEL_VA_BITS" -lt 47 ]; then
+    MONGO_IMAGE_TAG="7.0"
+  fi
+elif ! grep -m1 '^flags' /proc/cpuinfo 2>/dev/null | grep -q ' avx '; then
+  MONGO_IMAGE_TAG="4.4.18"
+fi
+# arm64 本地构建镜像的 tag(可用 AOI_ARM64_IMAGE 覆盖)
+ARM64_IMAGE="${AOI_ARM64_IMAGE:-aoi-js/server:arm64}"
+
+# x86_64 用官方镜像;arm64 默认改用本地构建镜像(仍可用 AOI_SERVER_IMAGE 显式覆盖)
+if [ "$IS_ARM64" -eq 1 ] && [ -z "${AOI_SERVER_IMAGE:-}" ]; then
+  SERVER_IMAGE="$ARM64_IMAGE"
+  IMG_BUILD_NEEDED=1
+else
+  SERVER_IMAGE="${AOI_SERVER_IMAGE:-registry.cn-hangzhou.aliyuncs.com/aoi-js/server:latest}"
+  IMG_BUILD_NEEDED=0
+fi
+>>>>>>> Stashed changes
 NPM_REGISTRY="${AOI_NPM_REGISTRY:-https://registry.npmjs.org}"
 MIN_MEM_MB=2048
 MIN_DISK_MB=5120
@@ -210,7 +276,16 @@ check_network() {
   if curl -fsSI --connect-timeout 5 -m 8 "https://${host}" >/dev/null 2>&1; then
     ok "网络可达: ${host}"
   else
-    warn "无法访问 ${host}(${NPM_REGISTRY})——前端包下载将失败。国内环境可设 AOI_NPM_REGISTRY=https://registry.npmmirror.com"
+    warn "无法访问 ${host}(${NPM_REGISTRY})——前端包回退源不可达。国内环境可设 AOI_NPM_REGISTRY=https://registry.npmmirror.com"
+  fi
+
+  # 前端包优先从国内镜像下载(见 fetch_frontend),单独检查其可达性
+  if [ "$host" != "registry.npmmirror.com" ]; then
+    if curl -fsSI --connect-timeout 5 -m 8 "https://registry.npmmirror.com" >/dev/null 2>&1; then
+      ok "网络可达: registry.npmmirror.com(前端包国内镜像,优先使用)"
+    else
+      warn "无法访问 registry.npmmirror.com——前端包将回退到 ${NPM_REGISTRY} 下载"
+    fi
   fi
 
   local img_host="${SERVER_IMAGE%%/*}"
@@ -218,6 +293,31 @@ check_network() {
     ok "网络可达: ${img_host}"
   else
     warn "无法访问 ${img_host}——拉取服务端镜像可能失败。请确认服务器可访问阿里云容器镜像仓库"
+  fi
+}
+
+# 兼容性受限(老 CPU / 内核 VA 不足)时提示 Mongo 版本降级原因
+check_mongo_cpu() {
+  if [ "$MONGO_IMAGE_TAG" = "latest" ]; then
+    ok "CPU 与内核满足 MongoDB latest(arm64 需 ARMv8.2 / x86 需 AVX,内核 VA≥47bit)"
+    return 0
+  fi
+  if [ "$IS_ARM64" -eq 1 ]; then
+    if grep -m1 '^Features' /proc/cpuinfo 2>/dev/null | grep -q 'dcpop'; then
+      # CPU 是 ARMv8.2,但内核 VA 受限或无法确认
+      if [ -n "$KERNEL_VA_BITS" ]; then
+        warn "内核虚拟地址空间受限(ARM64_VA_BITS=${KERNEL_VA_BITS}<47):MongoDB 8.x 的 tcmalloc 启动即崩(SIGTRAP 133),"
+      else
+        warn "无法确认内核虚拟地址空间(读不到内核配置,按保守版本处理):"
+      fi
+      warn "将使用 mongo:7.0(无 8.x 的 tcmalloc 问题;对 AOI 功能无影响,可用 AOI_MONGO_IMAGE 覆盖)"
+    else
+      warn "CPU 为 ARMv8.0 微架构(RK3399/树莓派4 等)——MongoDB 4.4.19+ 会非法指令崩溃,"
+      warn "将使用 mongo:4.4.18(最后支持 ARMv8.0 的官方版本;可用 AOI_MONGO_IMAGE 覆盖)"
+    fi
+  else
+    warn "CPU 不支持 AVX 指令——MongoDB 5.0+ 会非法指令崩溃,"
+    warn "将使用 mongo:4.4.18(最后支持老 CPU 的版本;可用 AOI_MONGO_IMAGE 覆盖)"
   fi
 }
 
@@ -231,6 +331,7 @@ run_checks() {
   check_compose
 
   info "── 环境检查 ──────────────────────────────"
+  check_mongo_cpu
   check_port 80 "HTTP 反向代理"
   check_port 443 "HTTPS 反向代理"
   check_port 1926 "AOI server(仅当需直连时关注)"
@@ -389,9 +490,10 @@ EOF
 gen_compose() {
   [ "$FORCE" -eq 0 ] && [ -f docker-compose.yml ] && { warn "已存在 docker-compose.yml,跳过"; return; }
   # 默认镜像:用户显式指定 > 加速器前缀直拉(Docker Hub 不可达时)> docker.io 官方地址
+  # mongo 的 tag 由顶部 MONGO_IMAGE_TAG 检测决定(老 CPU→4.4.18,内核 VA 受限→7.0)
   local mongo_img="${AOI_MONGO_IMAGE:-}"
   local caddy_img="${AOI_CADDY_IMAGE:-}"
-  [ -z "$mongo_img" ] && mongo_img="$([ -n "$MIRROR_PREFIX" ] && echo "${MIRROR_PREFIX}/library/mongo:latest" || echo "mongo:latest")"
+  [ -z "$mongo_img" ] && mongo_img="$([ -n "$MIRROR_PREFIX" ] && echo "${MIRROR_PREFIX}/library/mongo:${MONGO_IMAGE_TAG}" || echo "mongo:${MONGO_IMAGE_TAG}")"
   [ -z "$caddy_img" ] && caddy_img="$([ -n "$MIRROR_PREFIX" ] && echo "${MIRROR_PREFIX}/library/caddy:latest" || echo "caddy:latest")"
   cat > docker-compose.yml <<EOF
 version: '3.8'
@@ -498,19 +600,45 @@ EOF
 fetch_frontend() {
   [ -f frontend/index.html ] && { ok "前端已存在(frontend/index.html),跳过下载"; return; }
 
-  log "获取 @aoi-js/frontend 最新版信息(源: ${NPM_REGISTRY})..."
-  local meta url
-  meta="$(curl -fsSL --connect-timeout 10 -m 30 "${NPM_REGISTRY}/@aoi-js/frontend/latest" 2>/dev/null || true)"
-  if [ -z "$meta" ]; then
-    die "无法获取前端包信息。国内环境请用: AOI_NPM_REGISTRY=https://registry.npmmirror.com bash setup.sh"
-  fi
-  url="$(printf '%s' "$meta" | grep -oE '"tarball":"[^"]+"' | head -1 | cut -d'"' -f4)"
-  [ -n "$url" ] || die "解析前端包下载地址失败"
-
-  log "下载前端包: $url"
-  local tmp
+  log "获取 @aoi-js/frontend 版本信息..."
+  local tmp url meta urls ok2
   tmp="$(mktemp -d)"
-  curl -fsSL --connect-timeout 10 -m 300 "$url" -o "$tmp/frontend.tgz" || { rm -rf "$tmp"; die "前端包下载失败"; }
+  urls=()
+
+  # 候选下载源依次尝试(下载优先级:国内镜像 > 配置的 npm 源):
+  # 1) registry.npmmirror.com —— 国内直连最稳,latest 元数据里的 tarball
+  #    即形如 https://registry.npmmirror.com/@aoi-js/frontend/-/frontend-<版本>.tgz
+  meta="$(curl -fsSL --connect-timeout 10 -m 30 "https://registry.npmmirror.com/@aoi-js/frontend/latest" 2>/dev/null || true)"
+  if [ -n "$meta" ]; then
+    url="$(printf '%s' "$meta" | grep -oE '"tarball":"[^"]+"' | head -1 | cut -d'"' -f4)" || true
+    [ -n "$url" ] && urls+=("$url")
+  fi
+  # 2) 配置的 NPM_REGISTRY(默认 npmjs.org,可用 AOI_NPM_REGISTRY 覆盖)
+  meta="$(curl -fsSL --connect-timeout 10 -m 30 "${NPM_REGISTRY}/@aoi-js/frontend/latest" 2>/dev/null || true)"
+  if [ -n "$meta" ]; then
+    url="$(printf '%s' "$meta" | grep -oE '"tarball":"[^"]+"' | head -1 | cut -d'"' -f4)" || true
+    [ -n "$url" ] && urls+=("$url")
+  fi
+
+  if [ "${#urls[@]}" -eq 0 ]; then
+    rm -rf "$tmp"
+    die "无法获取前端包信息(镜像与 ${NPM_REGISTRY} 均不可达)。请检查网络后重试"
+  fi
+
+  ok2=0
+  for url in "${urls[@]}"; do
+    log "下载前端包: $url"
+    if curl -fsSL --connect-timeout 10 -m 300 "$url" -o "$tmp/frontend.tgz" && [ -s "$tmp/frontend.tgz" ]; then
+      ok2=1
+      break
+    fi
+    warn "下载失败,尝试下一个源..."
+  done
+  if [ "$ok2" -ne 1 ]; then
+    rm -rf "$tmp"
+    die "前端包下载失败(所有候选源均不可达)"
+  fi
+
   mkdir -p "$tmp/x" frontend
   tar -xzf "$tmp/frontend.tgz" -C "$tmp/x"
   if [ -d "$tmp/x/package/dist" ]; then
@@ -525,6 +653,93 @@ fetch_frontend() {
 }
 
 # -----------------------------------------------------------------------------
+<<<<<<< Updated upstream
+=======
+# 3.5 arm64:本地构建 server 镜像
+# -----------------------------------------------------------------------------
+# 官方 server 镜像(registry.cn-hangzhou.aliyuncs.com/aoi-js/server)仅 x86_64,
+# arm64/aarch64 上需本地构建。构建方式与官方等价:
+#   官方 Dockerfile = node:22-alpine → npm install --omit=dev --omit=optional → node lib/cli/index.js
+#   镜像内容 = apps/server/package.tgz(yarn pack 产物)
+#   本方案直接用 npm 发布的 @aoi-js/server(与 package.tgz 同一产物),免去源码构建
+# bcrypt@5 提供 linux-arm64-musl 预编译二进制,无需在 arm64 上编译原生依赖;
+# 预编译下载失败时(GitHub 不可达),镜像内已装 build-base 可本地编译兜底。
+build_server_image() {
+  [ "$IS_ARM64" -eq 1 ] && [ "$IMG_BUILD_NEEDED" -eq 1 ] || return 0
+
+  if docker image inspect "$SERVER_IMAGE" >/dev/null 2>&1; then
+    # 校验镜像入口可用:旧版 Dockerfile 缺少 lib/ 软链,容器启动即秒退
+    # (npm install 装到 node_modules/@aoi-js/server/,lib/ 不在安装根目录)
+    if docker run --rm --entrypoint node "$SERVER_IMAGE" \
+        -e "require('fs').existsSync('/opt/aoi-server/lib/cli/index.js')||process.exit(1)" \
+        >/dev/null 2>&1; then
+      ok "server 镜像已存在: $SERVER_IMAGE(本地构建),跳过"
+      return 0
+    fi
+    warn "server 镜像存在但入口校验失败(旧版构建,缺少 lib/),重新构建..."
+  fi
+
+  info "当前架构 ${ARCH}:官方 server 镜像无 arm64 版,用官方 npm 包 @aoi-js/server 本地构建..."
+  info "  目标镜像: $SERVER_IMAGE(与官方镜像内容等价)"
+  info "  构建源:   ${NPM_REGISTRY}"
+  log "构建中(需下载 node:22-alpine 与 npm 依赖,视网络情况约 2-10 分钟)..."
+  [ "$YES" -eq 0 ] && ! confirm "是否继续构建?" && die "已取消。"
+
+  local build_dir
+  build_dir="$(mktemp -d)"
+  cat > "$build_dir/Dockerfile" <<'EOF'
+# 与官方 docker/dockerfiles/server.dockerfile 等价:
+# node:22-alpine(多架构)+ npm install 官方发布的 @aoi-js/server
+# (官方镜像 = package.tgz = npm 发布产物,内容一致)
+FROM node:22-alpine
+
+# bcrypt 等原生模块优先用官方预编译二进制(linux-arm64-musl);
+# 预编译下载失败(GitHub 不可达)时,已装 build-base 可本地编译兜底
+RUN apk add --no-cache build-base python3
+
+WORKDIR /opt/aoi-server
+ARG NPM_REGISTRY=https://registry.npmjs.org
+# disturl:node-gyp 编译兜底时下载 Node 头文件走 npmmirror(国内可达),
+# 避免 bcrypt 预编译超时后连 nodejs.org 也超时导致构建失败
+ARG NODE_DISTURL=https://npmmirror.com/mirrors/node
+# npm install 会把包装到 node_modules/@aoi-js/server/,lib/ 不在安装根目录;
+# 必须软链 lib,server/updater 的 `node lib/cli/*.js` 入口才能解析(与官方解包结构一致)
+RUN npm install --registry=$NPM_REGISTRY --disturl=$NODE_DISTURL @aoi-js/server@latest --omit=dev --omit=optional \
+    && ln -s node_modules/@aoi-js/server/lib lib \
+    && npm cache clean --force
+
+USER node
+CMD ["node", "lib/cli/index.js"]
+EOF
+
+  local retry ok2=0
+  for retry in 1 2 3; do
+    if docker build -t "$SERVER_IMAGE" \
+        --build-arg "NPM_REGISTRY=${NPM_REGISTRY}" \
+        "$build_dir"; then
+      ok2=1
+      break
+    fi
+    warn "镜像构建失败(第 ${retry}/3 次),10 秒后重试..."
+    sleep 10
+  done
+  rm -rf "$build_dir"
+
+  if [ "$ok2" -eq 1 ]; then
+    ok "server 镜像构建完成: $SERVER_IMAGE"
+  else
+    echo
+    warn "server 镜像构建失败。可选方案:"
+    warn "  1. 检查 npm 源网络后重跑本脚本(已生成的配置会跳过)"
+    warn "  2. 用镜像加速源重试: AOI_NPM_REGISTRY=https://registry.npmmirror.com bash $0"
+    warn "  3. 自行构建后指定: AOI_SERVER_IMAGE=<你的arm64镜像> bash $0"
+    warn "     (构建命令参考: 上方 Dockerfile 内容,或官方仓库 文档/项目详细.md 6.3 源码构建)"
+    die "arm64 必须拥有本地 server 镜像才能继续"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+>>>>>>> Stashed changes
 # 4. 启动与自动验证
 # -----------------------------------------------------------------------------
 # 探测 Docker Hub 可达性;不可达时探测候选镜像加速器,选中结果记入 MIRROR_PREFIX
@@ -595,6 +810,7 @@ EOF
 
 # daemon 镜像加速器仍不稳定时,把 mongo/caddy 换成加速器前缀直拉地址
 # (如 docker.m.daocloud.io/library/mongo:latest,绕开 Docker Hub 认证流,国内更稳)
+# 只替换无前缀的裸镜像名,已带前缀的保持不变;mongo 的 tag(可能已降级为 4.4.18/7.0)原样保留
 switch_to_mirror_prefix_images() {
   local mirror host prefix changed=0
   mirror="$(grep -oE '"https://[^"]+"' /etc/docker/daemon.json 2>/dev/null | head -1 | tr -d '"' || true)"
@@ -603,18 +819,36 @@ switch_to_mirror_prefix_images() {
   host="${mirror#*://}"; host="${host%%/*}"
   prefix="${host}/library"
 
-  if grep -q 'image: mongo:latest' docker-compose.yml 2>/dev/null; then
-    sed -i "s#image: mongo:latest#image: ${prefix}/mongo:latest#" docker-compose.yml
+  if grep -qE 'image: mongo:[^ ]+' docker-compose.yml 2>/dev/null; then
+    sed -ri "s#image: mongo:([^ ]+)#image: ${prefix}/mongo:\1#" docker-compose.yml
     changed=1
   fi
-  if grep -q 'image: caddy:latest' docker-compose.yml 2>/dev/null; then
-    sed -i "s#image: caddy:latest#image: ${prefix}/caddy:latest#" docker-compose.yml
+  if grep -qE 'image: caddy:[^ ]+' docker-compose.yml 2>/dev/null; then
+    sed -ri "s#image: caddy:([^ ]+)#image: ${prefix}/caddy:\1#" docker-compose.yml
     changed=1
   fi
   if [ "$changed" -eq 1 ]; then
     ok "docker-compose.yml 已切换镜像源为 ${prefix}/... (加速器前缀直拉)"
   fi
   return $((1 - changed))
+}
+
+# 兼容性受限(老 CPU / 内核 VA 不足)时,已存在的 compose 若仍指向 mongo:latest,
+# 自动改为检测选定的版本(4.4.18/7.0);已有加速器前缀原样保留
+# (如 docker.m.daocloud.io/library/mongo:latest → .../mongo:7.0)。
+# 在 gen_compose 之后、启动服务之前调用,幂等:已是目标 tag 则无操作。
+fix_mongo_image() {
+  [ "$MONGO_IMAGE_TAG" = "latest" ] && return 0
+  [ -f docker-compose.yml ] || return 0
+  if grep -qE 'image: [^ #]*mongo:latest' docker-compose.yml 2>/dev/null; then
+    sed -ri "s#(image: [^ #]*mongo):latest#\1:${MONGO_IMAGE_TAG}#" docker-compose.yml
+    warn "当前环境不兼容 mongo:latest(CPU 指令集或内核 VA 受限),已自动改用镜像 mongo:${MONGO_IMAGE_TAG}"
+  fi
+  # 数据目录残留检查:降级后版本无法读取新版本写入的数据文件,启动前需清空
+  if [ -d ./mongo ] && [ -n "$(ls -A ./mongo 2>/dev/null)" ]; then
+    warn "mongo 数据目录 ./mongo 非空:若为 8.x/新版本残留数据(此前启动即崩,通常没有),"
+    warn "mongo:${MONGO_IMAGE_TAG} 将无法读取,需先执行: sudo rm -rf ./mongo/* 再重跑本脚本"
+  fi
 }
 
 # 列出 docker-compose.yml 中本地缺失的镜像(每行一个);输出为空 = 全部已在本地
@@ -664,18 +898,30 @@ compose_up() {
 }
 
 wait_ready() {
-  log "等待服务就绪(最多 120 秒)..."
-  local i
-  for i in $(seq 1 60); do
+  log "等待服务就绪(最多 300 秒;首次启动需等 Mongo 初始化,慢速设备可能较久)..."
+  local i running
+  for i in $(seq 1 150); do
     if curl -fsS --connect-timeout 3 -m 5 "http://127.0.0.1/api/ping" >/dev/null 2>&1; then
       echo
       ok "API 已就绪(耗时约 $((i * 2)) 秒)"
       return 0
     fi
+    # 每 30 秒报一次进度,避免误以为卡死
+    if [ $((i % 15)) -eq 0 ]; then
+      running="?"
+      running="$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d ' ')" || running="?"
+      warn "已等待 $((i * 2)) 秒(运行中容器 ${running}/4),继续等待..."
+    fi
     sleep 2
   done
   echo
-  warn "服务尚未就绪(超时)。请执行: docker compose logs server 查看错误"
+  warn "服务尚未就绪(超时 300 秒)。当前容器状态:"
+  docker compose ps 2>/dev/null || true
+  echo
+  warn "server / updater / mongo 最近日志(末尾 30 行):"
+  docker compose logs --tail 30 server updater mongo 2>/dev/null || true
+  echo
+  warn "排查命令: cd ${INSTALL_DIR} && docker compose logs -f server"
   return 1
 }
 
@@ -851,6 +1097,8 @@ EOF
 
   gen_env
   gen_compose
+  # 兼容性受限(老 CPU/内核 VA 不足)时,已部署过的 compose 若还指向 mongo:latest,此处自动修正
+  fix_mongo_image
   gen_caddyfile
   fetch_frontend
 
