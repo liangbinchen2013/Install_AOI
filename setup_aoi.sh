@@ -25,8 +25,6 @@
 #
 # 兼容系统: Ubuntu/Debian/CentOS/RHEL/Alma/Rocky/openSUSE/Fedora (x86_64/aarch64)
 # Windows 用户请使用 WSL2 或 Linux 服务器运行本脚本。
-<<<<<<< Updated upstream
-=======
 #
 # arm64(aarch64)支持说明:
 #   官方 server 镜像 registry.cn-hangzhou.aliyuncs.com/aoi-js/server 仅构建了
@@ -38,7 +36,6 @@
 #   ① 老 CPU(ARMv8.0/无 AVX)→ mongo:4.4.18;
 #   ② 内核 VA<47bit(香橙派等 Rockchip 内核)→ mongo:7.0
 #   (见下方 MONGO_IMAGE_TAG 检测,详见 check_mongo_cpu)。
->>>>>>> Stashed changes
 # =============================================================================
 
 set -Eeuo pipefail
@@ -46,9 +43,6 @@ set -Eeuo pipefail
 # -----------------------------------------------------------------------------
 # 基础配置
 # -----------------------------------------------------------------------------
-<<<<<<< Updated upstream
-SERVER_IMAGE="${AOI_SERVER_IMAGE:-registry.cn-hangzhou.aliyuncs.com/aoi-js/server:latest}"
-=======
 # 架构检测:aarch64/arm64 时官方 server 镜像无 arm64 版,
 # 需用官方 npm 包 @aoi-js/server 本地构建(见 build_server_image)
 ARCH="$(uname -m)"
@@ -98,7 +92,6 @@ else
   SERVER_IMAGE="${AOI_SERVER_IMAGE:-registry.cn-hangzhou.aliyuncs.com/aoi-js/server:latest}"
   IMG_BUILD_NEEDED=0
 fi
->>>>>>> Stashed changes
 NPM_REGISTRY="${AOI_NPM_REGISTRY:-https://registry.npmjs.org}"
 MIN_MEM_MB=2048
 MIN_DISK_MB=5120
@@ -653,8 +646,6 @@ fetch_frontend() {
 }
 
 # -----------------------------------------------------------------------------
-<<<<<<< Updated upstream
-=======
 # 3.5 arm64:本地构建 server 镜像
 # -----------------------------------------------------------------------------
 # 官方 server 镜像(registry.cn-hangzhou.aliyuncs.com/aoi-js/server)仅 x86_64,
@@ -739,7 +730,6 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
->>>>>>> Stashed changes
 # 4. 启动与自动验证
 # -----------------------------------------------------------------------------
 # 探测 Docker Hub 可达性;不可达时探测候选镜像加速器,选中结果记入 MIRROR_PREFIX
